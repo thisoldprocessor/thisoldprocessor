@@ -1,0 +1,157 @@
+From ada9cd71d2e7006ff015d2f1d6d94ddfc8df981e Mon Sep 17 00:00:00 2001
+From: This Old Processor <this.old.processor@gmail.com>
+Date: Wed, 2 Oct 2013 23:38:27 -0700
+Subject: [PATCH] Make the sim work for OSX
+
+---
+ migen/sim/ipc.py |   24 ++++++++++++++++++------
+ vpi/Makefile     |    6 +++---
+ vpi/ipc.c        |   35 +++++++++++++++++++++++++++++++----
+ 3 files changed, 52 insertions(+), 13 deletions(-)
+
+diff --git a/migen/sim/ipc.py b/migen/sim/ipc.py
+index 7e1b744..a93a2a3 100644
+--- a/migen/sim/ipc.py
++++ b/migen/sim/ipc.py
+@@ -76,20 +76,30 @@ def _pack_int32(v):
+ 		(v & 0xff000000) >> 24
+ 	]
+ 
++def _pack_int16(v):
++	return [
++		v & 0xff,
++		(v & 0xff00) >> 8,
++	]
++
+ def _pack(message):
+ 	r = [message.code]
++	payload = []
+ 	for t, p in message.parameters:
+ 		value = getattr(message, p)
+ 		assert(isinstance(value, t))
+ 		if t == int:
+-			r += _pack_int(value)
++			payload += _pack_int(value)
+ 		elif t == str:
+-			r += _pack_str(value)
++			payload += _pack_str(value)
+ 		elif t == Int32:
+-			r += _pack_int32(value)
++			payload += _pack_int32(value)
+ 		else:
+ 			raise TypeError
+-	return bytes(r)
++	payload = bytes(payload)
++	if message.code in (2, 3):
++		r += _pack_int16(len(payload))
++	return bytes(r) + payload
+ 
+ #
+ # Unpacking
+@@ -140,10 +150,11 @@ class PacketTooLarge(Exception):
+ class Initiator:
+ 	def __init__(self, sockaddr):
+ 		self.sockaddr = sockaddr
+-		self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
++		self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+ 		self._cleanup_file()
+ 		self.socket.bind(self.sockaddr)
+ 		self.socket.listen(1)
++		self.conn = None
+ 	
+ 	def _cleanup_file(self):
+ 		try:
+@@ -155,7 +166,8 @@ class Initiator:
+ 		self.conn, addr = self.socket.accept()
+ 	
+ 	def send(self, message):
+-		self.conn.send(_pack(message))
++		m = _pack(message)
++		self.conn.send(m)
+ 	
+ 	def recv(self):
+ 		maxlen = 2048
+diff --git a/vpi/Makefile b/vpi/Makefile
+index dc2fa02..773fc56 100644
+--- a/vpi/Makefile
++++ b/vpi/Makefile
+@@ -1,5 +1,5 @@
+-INSTDIR=/usr/lib/ivl
+-INCDIRS=-I/usr/include/iverilog
++INSTDIR=/usr/local/lib/ivl
++INCDIRS=-I/usr/local/include/iverilog
+ 
+ OBJ=ipc.o main.o
+ 
+@@ -9,7 +9,7 @@ all: migensim.vpi
+ 	$(CC) -fPIC -Wall -O2 -c $(INCDIRS) -o $@ $<
+ 
+ migensim.vpi: $(OBJ)
+-	$(CC) -shared -o $@ $(OBJ) -lvpi
++	$(CC) -bundle -undefined suppress -flat_namespace -o $@ $(OBJ) -lvpi
+ 
+ install: migensim.vpi
+ 	install -m755 -t $(INSTDIR) $^
+diff --git a/vpi/ipc.c b/vpi/ipc.c
+index d41920c..aaa57b0 100644
+--- a/vpi/ipc.c
++++ b/vpi/ipc.c
+@@ -36,7 +36,7 @@ struct ipc_softc *ipc_connect(const char *sockaddr,
+ 	sc->h_read = h_read;
+ 	sc->user = user;
+ 	
+-	sc->socket = socket(AF_UNIX, SOCK_SEQPACKET, 0);
++	sc->socket = socket(AF_UNIX, SOCK_STREAM, 0);
+ 	if(sc->socket < 0) {
+ 		free(sc);
+ 		return NULL;
+@@ -78,16 +78,43 @@ int ipc_receive(struct ipc_softc *sc)
+ {
+ 	char buffer[MAX_LEN];
+ 	ssize_t l;
++	unsigned int varlen;
+ 	int i;
+-	
+-	l = recv(sc->socket, buffer, MAX_LEN, 0);
++	char op;
++
++	l = recv(sc->socket, &op, 1, 0);
++
++	if(l == 0)
++		return 2;
++
++	switch(op) {
++		case MESSAGE_GO:
++			varlen = 0;
++			break;
++		case MESSAGE_WRITE:
++		case MESSAGE_READ: {
++			l = recv(sc->socket, buffer, 2, 0);
++			varlen = buffer[0] | buffer[1] << 8;
++			break;
++		}
++		default:
++			return 0;
++	}
++
++	if(varlen >= MAX_LEN)
++		return 0;
++
++	if(varlen) {
++		l = recv(sc->socket, buffer, varlen, 0);
++	}
++
+ 	if(l == 0)
+ 		return 2;
+ 	if((l < 0) || (l >= MAX_LEN))
+ 		return 0;
+ 	
+ 	i = 0;
+-	switch(buffer[i++]) {
++	switch(op) {
+ 		case MESSAGE_GO:
+ 			assert(l == 1);
+ 			return sc->h_go(sc->user);
+-- 
+1.7.8.4
+

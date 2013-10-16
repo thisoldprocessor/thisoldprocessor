@@ -1,0 +1,77 @@
+From 4729dcdccaca384de9fdca9daa4bf8bc211e8862 Mon Sep 17 00:00:00 2001
+From: This Old Processor <this.old.processor@gmail.com>
+Date: Wed, 2 Oct 2013 23:32:36 -0700
+Subject: [PATCH] Use .close, not __del__
+
+Per http://docs.python.org/3.1/reference/datamodel.html#object.__del__
+the use of __del__ and del x is largely going to result in undefined
+behavior in Python. .close is considerably more idiomatic for this
+pattern.
+---
+ migen/sim/generic.py |   13 ++++++++++---
+ migen/sim/icarus.py  |    5 ++---
+ migen/sim/ipc.py     |    8 +++-----
+ 3 files changed, 15 insertions(+), 11 deletions(-)
+
+diff --git a/migen/sim/generic.py b/migen/sim/generic.py
+index 3058732..5862be7 100644
+--- a/migen/sim/generic.py
++++ b/migen/sim/generic.py
+@@ -176,9 +176,16 @@ class Simulator:
+ 			for k, v in value.items():
+ 				self.multiwrite(getattr(obj, k), v)
+ 
+-	def __del__(self):
+-		del self.ipc
+-		del self.sim_runner
++	def close(self):
++		self.ipc.close()
++		self.sim_runner.close()
++
++	def __enter__(self):
++		return self
++
++	def __exit__(self, *args):
++		self.close()
++
+ 
+ # Contrary to multiread/multiwrite, Proxy fetches the necessary signals only and
+ # immediately forwards writes into the simulation.
+diff --git a/migen/sim/icarus.py b/migen/sim/icarus.py
+index a692872..f693b14 100644
+--- a/migen/sim/icarus.py
++++ b/migen/sim/icarus.py
+@@ -27,9 +27,8 @@ class Runner:
+ 		subprocess.check_call(["iverilog", "-o", self.vvp_file] + self.options + [self.top_file, self.dut_file] + self.extra_files)
+ 		self.process = subprocess.Popen(["vvp", "-mmigensim", self.vvp_file])
+ 
+-	def __del__(self):
+-		if hasattr(self, "process"):
+-			self.process.wait()
++	def close(self):
++		self.process.wait()
+ 		if not self.keep_files:
+ 			for f in [self.top_file, self.dut_file, self.vvp_file]:
+ 				try:
+diff --git a/migen/sim/ipc.py b/migen/sim/ipc.py
+index 0121a59..7e1b744 100644
+--- a/migen/sim/ipc.py
++++ b/migen/sim/ipc.py
+@@ -166,11 +166,9 @@ class Initiator:
+ 			raise PacketTooLarge
+ 		return _unpack(packet)
+ 
+-	def __del__(self):
+-		if hasattr(self, "conn"):
++	def close(self):
++		if self.conn:
+ 			self.conn.shutdown(socket.SHUT_RDWR)
+ 			self.conn.close()
+-		if hasattr(self, "socket"):
+-			self.socket.shutdown(socket.SHUT_RDWR)
+-			self.socket.close()
++		self.socket.close()
+ 		self._cleanup_file()
+-- 
+1.7.8.4
+
